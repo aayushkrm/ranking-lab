@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import sys
 import tempfile
 from urllib.request import urlopen
@@ -168,6 +169,53 @@ def evaluate(model, targets, catalog, k=10):
             'catalog_coverage': len(recommendations) / len(catalog), 'per_user': per_user}
 
 
+def stratify_users(result):
+    """Summarize user-averaged metrics; catalog coverage is not additive by group."""
+    groups = {}
+    for name, is_cold in (('cold', True), ('warm', False)):
+        rows = [r for r in result['per_user'] if r['cold_user'] == is_cold]
+        groups[name] = {'users': len(rows),
+                        'hit_rate': sum(r['hit'] for r in rows) / len(rows) if rows else None,
+                        'ndcg': sum(r['ndcg'] for r in rows) / len(rows) if rows else None,
+                        'target_positives': sum(r['target_positives'] for r in rows),
+                        'unavailable_positives': sum(r['unavailable_positives'] for r in rows)}
+    return groups
+
+
+def paired_bootstrap(baseline, candidate, *, seed=42, repetitions=2000):
+    """95% percentile bootstrap of paired per-user metric differences (candidate - baseline)."""
+    if not isinstance(repetitions, int) or isinstance(repetitions, bool) or repetitions < 1:
+        raise ValueError('repetitions must be a positive integer')
+    def index(rows):
+        output = {}
+        for row in rows:
+            uid = row['user_id']
+            if uid in output:
+                raise ValueError('duplicate user in paired comparison')
+            output[uid] = row
+        return output
+    old, new = index(baseline), index(candidate)
+    if not old or old.keys() != new.keys():
+        raise ValueError('paired comparisons require identical nonempty user sets')
+    ids = sorted(old)
+    differences = {metric: [new[u][metric] - old[u][metric] for u in ids] for metric in ('hit', 'ndcg')}
+    rng = random.Random(seed)
+    samples = {metric: [] for metric in differences}
+    for _ in range(repetitions):
+        draw = [rng.randrange(len(ids)) for _ in ids]
+        for metric in samples:
+            samples[metric].append(sum(differences[metric][i] for i in draw) / len(ids))
+    def percentile(values, p):
+        values = sorted(values)
+        position = p * (len(values) - 1)
+        low, high = math.floor(position), math.ceil(position)
+        return values[low] + (values[high] - values[low]) * (position - low)
+    return {'users': len(ids), 'seed': seed, 'repetitions': repetitions, 'confidence_level': .95,
+            'metrics': {metric: {'mean_difference': sum(differences[metric]) / len(ids),
+                                 'ci_low': percentile(samples[metric], .025),
+                                 'ci_high': percentile(samples[metric], .975)} for metric in differences}}
+
+
 def experiment(rows, catalog, k=10):
     train, val, test, cutoffs = split(rows)
     val_catalog = {r.item for r in train}
@@ -177,6 +225,9 @@ def experiment(rows, catalog, k=10):
     for mode, shrink in settings:
         metrics = evaluate(train_model(train, mode, shrink), val, val_catalog, k)
         trials.append({'mode': mode, 'shrink': shrink, 'metrics': metrics})
+    comparisons = [{'mode': trial['mode'], 'shrink': trial['shrink'],
+                    'difference_from_popularity': paired_bootstrap(trials[0]['metrics']['per_user'], trial['metrics']['per_user'])}
+                   for trial in trials[1:]]
     selected = max(range(len(trials)), key=lambda i: trials[i]['metrics']['ndcg'])
     setting = trials[selected]
     baseline = evaluate(train_model(train + val), test, test_catalog, k)
@@ -186,7 +237,9 @@ def experiment(rows, catalog, k=10):
                          'validation_catalog_size': len(val_catalog), 'test_catalog_size': len(test_catalog),
                          'validation_start_timestamp': cutoffs[0], 'test_start_timestamp': cutoffs[1],
                          'train_ratings': len(train), 'validation_ratings': len(val), 'test_ratings': len(test)},
-            'validation': trials, 'selected': {'mode': setting['mode'], 'shrink': setting['shrink']},
+            'validation': trials, 'validation_paired_bootstrap': comparisons,
+            'test_by_user_history': {'popularity': stratify_users(baseline), 'selected': stratify_users(selected_test)},
+            'selected': {'mode': setting['mode'], 'shrink': setting['shrink']},
             'test_popularity': baseline, 'test_selected': selected_test}
 
 

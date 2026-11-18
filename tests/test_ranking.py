@@ -2,7 +2,7 @@ import math
 import unittest
 import tempfile
 from pathlib import Path
-from ranking_lab import Rating, split, train_model, rank, evaluate, experiment, load_data
+from ranking_lab import Rating, split, train_model, rank, evaluate, experiment, load_data, paired_bootstrap, stratify_users
 
 
 class RankingTests(unittest.TestCase):
@@ -50,6 +50,31 @@ class RankingTests(unittest.TestCase):
             (p / 'u.data').write_text('1 1 5 1\n1 1 4 2\n', encoding='ascii')
             with self.assertRaisesRegex(ValueError, 'duplicate'):
                 load_data(p)
+
+    def test_bootstrap_pairs_ids_and_is_reproducible(self):
+        baseline = [{'user_id': 1, 'hit': 0, 'ndcg': 0}, {'user_id': 2, 'hit': 1, 'ndcg': .5}]
+        candidate = [{'user_id': 2, 'hit': 1, 'ndcg': .5}, {'user_id': 1, 'hit': 1, 'ndcg': 1}]
+        result = paired_bootstrap(baseline, candidate, repetitions=100)
+        self.assertEqual(result, paired_bootstrap(baseline, list(reversed(candidate)), repetitions=100))
+        self.assertEqual(result['metrics']['hit']['mean_difference'], .5)
+        self.assertEqual(result['metrics']['ndcg']['mean_difference'], .5)
+        self.assertEqual(result['metrics']['hit']['ci_low'], 0)
+        self.assertEqual(result['metrics']['hit']['ci_high'], 1)
+        with self.assertRaises(ValueError):
+            paired_bootstrap(baseline, candidate[:1])
+        with self.assertRaises(ValueError):
+            paired_bootstrap(baseline, [candidate[0], candidate[0]])
+
+    def test_strata_have_user_averages_and_no_coverage(self):
+        result = {'per_user': [
+            {'cold_user': True, 'hit': 1, 'ndcg': .5, 'target_positives': 2, 'unavailable_positives': 1},
+            {'cold_user': True, 'hit': 0, 'ndcg': 0, 'target_positives': 1, 'unavailable_positives': 0}]}
+        groups = stratify_users(result)
+        self.assertEqual(groups['cold']['users'], 2)
+        self.assertEqual(groups['cold']['hit_rate'], .5)
+        self.assertEqual(groups['cold']['ndcg'], .25)
+        self.assertNotIn('catalog_coverage', groups['cold'])
+        self.assertIsNone(groups['warm']['ndcg'])
 
     def test_validation_selection_and_refit(self):
         rows = [Rating(1, t, 5, t) for t in range(1, 21)]

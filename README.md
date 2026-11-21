@@ -12,6 +12,28 @@ The download uses the [official GroupLens archive](https://files.grouplens.org/d
 
 **Data terms:** The archive's README permits research use under conditions: acknowledge the data in publications, do not imply GroupLens or University of Minnesota endorsement, do not redistribute without permission, and obtain GroupLens faculty permission before commercial or revenue-bearing use. Read the downloaded README for the complete terms. Cite [Harper and Konstan, The MovieLens Datasets: History and Context (2015)](https://doi.org/10.1145/2827872). This 1997–98 sample is old and filtered to users with at least 20 ratings and complete demographics.
 
+## Explore recommendations and rolling windows
+
+```sh
+# Inspect a historical user at the original test cutoff; only earlier ratings are used.
+python3 ranking_extra.py recommend 1 --as-of 891382309 --k 5
+# Reproduce four exploratory chronological comparisons.
+python3 ranking_extra.py rolling --output rolling-results.json
+```
+
+The recommendation command shows recent rated titles and ranked unseen titles. A CF score is the sum of item similarities, not a probability; `prior_positive_count` is the number of earlier positive ratings. An item with CF signal ranks before zero-signal items; popularity fills the remaining positions. CF score ties use popularity, then item ID. An unknown or cold user receives popularity recommendations. Without `--as-of`, the command uses all locally available historical ratings; it is an offline demonstration, not a live service.
+
+The rolling comparison fixes item-CF shrinkage at 10 and adds that popularity fallback. It compares against popularity at four global 60%, 70%, 80% and 90% event-time cutoffs. Each model and its candidate catalog use only ratings strictly before the cutoff. Each subsequent 10% window is a static basket per user, with tied timestamps kept together. The final window was already inspected in the original experiment below, and these comparisons were designed after inspecting that result. **All four are exploratory**, not independent confirmatory tests. The code uses seed 42 and 2,000 paired user-bootstrap draws; intervals do not reflect model selection, dependent users, or changes over time.
+
+| Event-time window | Eligible users | Popularity NDCG@10 | CF + fallback NDCG@10 | Difference, 95% user-bootstrap interval | Popularity / CF catalog coverage |
+|---|---:|---:|---:|---:|---:|
+| 60–70% | 168 | 0.2325 | 0.2262 | −0.0063 [−0.0182, 0.0050] | 0.0417 / 0.0682 |
+| 70–80% | 153 | 0.2163 | 0.2228 | +0.0066 [−0.0052, 0.0178] | 0.0420 / 0.0699 |
+| 80–90% | 186 | 0.2365 | 0.2268 | −0.0097 [−0.0292, 0.0065] | 0.0446 / 0.0712 |
+| 90–100% | 153 | 0.2445 | 0.2554 | +0.0109 [−0.0081, 0.0301] | 0.0458 / 0.0733 |
+
+In this run, the fallback increased catalog coverage in all four windows. NDCG differences changed direction and all four user-bootstrap intervals included zero; the run does not establish an accuracy improvement. The JSON report includes hit rate, cold/warm slices, cutoff timestamps, unavailable targets and the number of eligible users whose entire list came from popularity. The local report is ignored by Git. The original experiment and its results remain below.
+
 ## Evaluation design
 
 ```text

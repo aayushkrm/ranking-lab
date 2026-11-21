@@ -100,7 +100,7 @@ def split(rows):
 
 def train_model(rows, mode='popularity', shrink=0):
     """Binary positive interactions. Cosine item-item similarity with co-count shrinkage."""
-    if mode not in ('popularity', 'item_cf') or shrink < 0:
+    if mode not in ('popularity', 'item_cf', 'item_cf_fallback') or shrink < 0:
         raise ValueError('invalid model')
     users = defaultdict(set)
     seen = defaultdict(set)
@@ -110,7 +110,7 @@ def train_model(rows, mode='popularity', shrink=0):
             users[r.user].add(r.item)
     counts = Counter(i for history in users.values() for i in history)
     neighbors = defaultdict(list)
-    if mode == 'item_cf':
+    if mode in ('item_cf', 'item_cf_fallback'):
         pairs = Counter()
         for history in users.values():
             ordered = sorted(history)
@@ -124,19 +124,34 @@ def train_model(rows, mode='popularity', shrink=0):
     return {'mode': mode, 'seen': seen, 'users': users, 'counts': counts, 'neighbors': neighbors}
 
 
-def rank(model, user, catalog, k):
+def ranked_details(model, user, catalog, k):
+    """Rank unseen candidates; fallback uses popularity only when CF has no score."""
     if k < 1:
         raise ValueError('k must be positive')
     scores = defaultdict(float)
-    if model['mode'] == 'item_cf':
+    if model['mode'] in ('item_cf', 'item_cf_fallback'):
         for prior in sorted(model['users'].get(user, ())):
             for item, similarity in model['neighbors'].get(prior, ()):
                 scores[item] += similarity
     else:
         scores.update(model['counts'])
     seen = model['seen'].get(user, set())
-    candidates = (item for item in catalog if item not in seen)
-    return sorted(candidates, key=lambda item: (-scores[item], item))[:k]
+    candidates = [item for item in catalog if item not in seen]
+    if model['mode'] == 'item_cf_fallback':
+        # CF evidence has priority; popularity fills all zero-signal positions.
+        candidates.sort(key=lambda item: (-bool(scores[item]), -scores[item],
+                                           -model['counts'].get(item, 0), item))
+    else:
+        candidates.sort(key=lambda item: (-scores[item], item))
+    return [{'item_id': item, 'score': scores[item],
+             'source': ('item_cf' if scores[item] else 'popularity')
+             if model['mode'] == 'item_cf_fallback' else model['mode'],
+             'prior_positive_count': model['counts'].get(item, 0)}
+            for item in candidates[:k]]
+
+
+def rank(model, user, catalog, k):
+    return [r['item_id'] for r in ranked_details(model, user, catalog, k)]
 
 
 def evaluate(model, targets, catalog, k=10):
